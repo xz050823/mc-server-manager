@@ -267,6 +267,110 @@ minecraft-backup-now cloud
 `/apps/bdpan/mc-backups/hello-new-generation`。日常至少检查 Minecraft 为 active、timer 为
 enabled/active、没有长期滞留的 `.partial`，并确认最新成功日志含 `Cloud multipart upload verified`。
 
+### 已验证的非覆盖式本地回档
+
+`2026-07-17` 已在正式服用
+`hello-new-generation_cold_2026-07-17_01-26-36_+0800.tar.zst` 完成一次回档。该流程不把归档直接覆盖到
+运行目录，而是先解压、检查和配置暂存副本，停服后才通过目录改名切换。切换前的正式目录保留为
+`/data/minecraft/hello-new-generation.before-rollback-20260717-114542`。
+
+重复执行时先建立本次变量，归档名必须由操作员明确填写，不得用“最新文件”模糊选择：
+
+```bash
+archive=/data/minecraft/backups/hello-new-generation/hello-new-generation_cold_YYYY-MM-DD_HH-MM-SS_+0800.tar.zst
+service=hello-new-generation.service
+live=/data/minecraft/hello-new-generation
+staging=/data/minecraft/hello-new-generation.restore-staging
+safety="${live}.before-rollback-$(date '+%Y%m%d-%H%M%S')"
+```
+
+先暂停未来调度，并在 Minecraft 仍运行时完成只读校验与独立解压：
+
+```bash
+minecraft-backup-now pause
+archive_dir="$(dirname "$archive")"
+archive_name="$(basename "$archive")"
+(cd "$archive_dir" && sha256sum -c "${archive_name}.sha256")
+tar -tf "$archive" >/dev/null
+tar -tf "$archive" | grep -E '^hello-new-generation/(server.properties|world/level.dat)$'
+
+test ! -e "$staging"
+install -d -o minecraft -g minecraft -m 0750 "$staging"
+runuser -u minecraft -- tar --zstd -xf "$archive" \
+  -C "$staging" --strip-components=1
+test -s "$staging/world/level.dat"
+```
+
+归档中的 `server.properties` 可能含旧 RCON 密码。切换前必须使用现有受保护密码文件更新暂存副本，
+不得把密码输出到终端或文档：
+
+```bash
+python3 /usr/local/libexec/minecraft-backup/configure-rcon.py \
+  "$staging/server.properties" \
+  /etc/minecraft-backup/rcon-password
+chown minecraft:minecraft "$staging/server.properties"
+chmod 0640 "$staging/server.properties"
+```
+
+让所有玩家下线并通过 RCON 再次确认人数为 0 后，才进入停服切换窗口：
+
+```bash
+python3 /usr/local/libexec/minecraft-backup/minecraft-rcon.py \
+  --host 127.0.0.1 \
+  --port 25575 \
+  --password-file /etc/minecraft-backup/rcon-password \
+  --timeout 30 \
+  list
+
+systemctl stop "$service"
+test "$(systemctl show "$service" -p MainPID --value)" = 0
+test ! -e "$safety"
+mv "$live" "$safety"
+mv "$staging" "$live"
+systemctl start "$service"
+
+restore_ready=0
+for _ in $(seq 1 60); do
+  if systemctl is-active --quiet "$service" && \
+     python3 /usr/local/libexec/minecraft-backup/minecraft-rcon.py \
+       --host 127.0.0.1 \
+       --port 25575 \
+       --password-file /etc/minecraft-backup/rcon-password \
+       --timeout 10 \
+       list >/dev/null 2>&1; then
+    restore_ready=1
+    break
+  fi
+  sleep 5
+done
+test "$restore_ready" = 1
+```
+
+启动后必须确认服务 active、RCON 可用，再由玩家验证位置、背包、末影箱、世界、Sable 子世界、Civil
+数据、Create 机器、任务和权限。若最后的启动检查或客户端验收失败，保持 timer 停用并执行：
+
+```bash
+systemctl stop "$service"
+test "$(systemctl show "$service" -p MainPID --value)" = 0
+failed="${live}.failed-after-rollback-$(date '+%Y%m%d-%H%M%S')"
+test -e "$safety"
+if test -e "$live"; then
+  test ! -e "$failed"
+  mv "$live" "$failed"
+fi
+mv "$safety" "$live"
+systemctl start "$service"
+```
+
+随后重新验证服务与 RCON。不要覆盖、合并或删除任一目录；失败目录也要保留到原因查明。
+
+本次生产演练中服务成功出现 `Done`，RCON 恢复，玩家登录和实际游玩无异常。验收后执行
+`minecraft-backup-now resume`，当时状态显示 timer 为 enabled/active、Minecraft 为 active、2 名玩家
+在线、`Offline since: none`，证明观察期从零开始且没有在玩家在线时停服。
+
+本次只验证了本地完整归档的回档。仅依赖百度网盘的下载、分卷校验、重组与回档仍是未验收边界。
+回档前安全目录至少保留到产生并验证一份回档后的新冷备份；清理属于独立维护操作，不得顺手执行。
+
 ### bdpan 登录失效
 
 必须用 `minecraft` 用户和 `/data/minecraft` HOME；用 root 执行会误用 `/root/.config/bdpan`。先暂停
@@ -330,7 +434,9 @@ RCON 本身无需因停用备份而撤回。如果确需撤回，必须另行安
 - [x] 冷备份归档、SHA-256 和关键文件已验证；
 - [ ] 压缩成功和失败路径都能恢复 Minecraft；
 - [x] Minecraft 重启后 RCON 和客户端登录正常；
+- [x] 本地冷归档已完成一次非覆盖式生产回档并由玩家验证；
+- [ ] 仅依赖云端分卷的下载、重组与完整回档；
 - [x] bdpan 网页与命令行均看到全部分卷、归档 SHA-256 和最后写入的分卷清单；
 - [ ] 本地上限 3、云端硬上限 100；
 - [x] 唯一 timer 已启用并记录下一次检查时间；
-- [ ] 负责人知道如何停用 timer 并人工恢复 Minecraft。
+- [x] 负责人知道如何停用 timer、人工恢复 Minecraft 并从零恢复观察期。

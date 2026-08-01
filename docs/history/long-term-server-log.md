@@ -614,3 +614,28 @@
 - v5 维护入口已部署：11 项测试通过；生产调用 `status`、`logs`、自动分页 `cloud` 与 `resume` 成功。
   云端完成清单汇总为 1 份、大小 1620 字节。恢复 timer 时有 1 名玩家在线，命令先清除旧观察状态
   再安排下一次检查，避免沿用维护前的离线计时；Minecraft 保持 active。
+
+### 2026-07-17 本地冷备份非覆盖式回档演练
+
+- 目标：把正式服回档到
+  `hello-new-generation_cold_2026-07-17_01-26-36_+0800.tar.zst`，同时完整保留回档前存档，接受约
+  3 至 10 分钟维护窗口。
+- 回档前先停用 `minecraft-backup-upload.timer`，确认没有正在运行的备份任务；目标归档先通过归档
+  SHA-256、tar 流读取和关键文件检查，没有直接解压覆盖正式目录。
+- 归档先解压到 `/data/minecraft` 下的独立暂存目录。切换前使用
+  `/etc/minecraft-backup/rcon-password` 更新暂存副本的 `server.properties`，过程中没有回显或记录密码。
+- 确认 RCON 返回 0 名玩家后，正常停止 `hello-new-generation.service`；服务完全停止后把原正式目录
+  改名为 `/data/minecraft/hello-new-generation.before-rollback-20260717-114542`，再把暂存目录改名为
+  `/data/minecraft/hello-new-generation`。因此回档没有覆盖或合并回档前存档。
+- 已准备启动失败时自动把原目录换回的回滚保护，但本次没有触发。恢复后的服务为 active，日志出现
+  `Done`，RCON 正常，FTB Quests 与 Sable 完成初始化；未发现 `level.dat` 损坏或世界启动崩溃。
+- 启动日志仍有整合包既有的 Mixin、KubeJS、缺失 registry 项和配方解析告警；它们没有阻止服务端
+  启动。玩家随后登录并实际游玩，确认本次恢复没有发现问题。
+- 验收时正式目录与回档前安全目录均约 `5.5G`；`/data` 为 49G，使用 25G，可用 22G；本地备份目录
+  约 13G。安全目录继续保留，没有在回档流程中清理。
+- 验收期间自动 timer 保持 inactive/disabled。确认恢复正常后执行 `minecraft-backup-now resume`；
+  状态显示 Minecraft active、timer enabled/active、备份任务 inactive，且有 2 名玩家在线，
+  `Offline since`、`Last player check` 和上传退避状态均为空，证明观察期从零开始且没有误停服。
+- 本次把“本地完整冷归档的非覆盖式恢复”从待验收改为已验证。尚未验证的灾难恢复边界是：从百度
+  网盘下载全部分卷、按 `.parts.sha256` 校验和重组、再仅依赖云端副本完成相同切换。其他未主动触发
+  边界仍包括本地第 4 份清理、云端 100 份硬上限和 bdpan Token 长期自动刷新。
